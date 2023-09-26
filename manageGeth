@@ -1,0 +1,496 @@
+#!/usr/bin/python3
+
+import argparse
+import os
+import requests
+import json
+import subprocess
+import sys
+
+
+version_geth = "geth-alltools-linux-amd64-1.13.1-3f40e65c"
+geth_and_tools = "https://gethstore.blob.core.windows.net/builds/"+version_geth+".tar.gz"
+working_derictory = "/opt/geth"
+user = os.getlogin()
+
+if not os.geteuid() == 0:
+    print("run with sudo")
+    sys.exit()
+
+bootnode_systemd_service_config = """ 
+[Unit]
+Description=BootNode
+
+[Service]
+User=root
+WorkingDirectory="""+working_derictory+"""
+ExecStart="""+working_derictory+"""/bin/bootnode --nodekey """+working_derictory+"""/bootnode/boot.key --verbosity 3
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+sealer_systemd_service_config = """
+[Unit]
+Description=Sealer_<sealername>
+
+[Service]
+User=root
+WorkingDirectory=/opt/geth/sealers/<sealername>
+ExecStart=/opt/geth/bin/geth  --datadir /opt/geth/sealers/<sealername>/data --miner.etherbase 0x<address> --networkid "<network_id>" --miner.gasprice "0" --http --http.addr '0.0.0.0' --http.port <httpport> --http.corsdomain '*' --http.api 'admin,eth,miner,net,web3,personal,txpool' --ws --ws.addr '0.0.0.0' --ws.port <wsport> --ws.origins '*' --bootnodes "enode://<enode>" --unlock 0x<address> --password="/opt/geth/passwords/<address>.pass" --verbosity 3 --allow-insecure-unlock --mine --ipcpath="/opt/geth/sealers/<sealername>/geth.ipc" --port <port> --authrpc.port <authport>
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
+"""
+
+def download_binares():
+  if not os.path.exists(working_derictory+"/bin"):
+    os.system("mkdir " + working_derictory)
+    os.chdir(working_derictory)
+    os.system("wget "+geth_and_tools)
+    os.system("tar -xvzf "+version_geth+".tar.gz")
+    os.system("mv "+version_geth +" bin")
+    os.system("rm "+version_geth+".tar.gz")
+  else:
+    print("Geth and tools already downloaded")
+
+
+def prepare_bootnode():
+  print("== Prepare bootnode")
+  if not os.path.exists(working_derictory+"/bootnode"):
+    os.chdir(working_derictory)
+    os.system("mkdir bootnode")
+    os.system("./bin/bootnode -genkey ./bootnode/boot.key")
+
+    with open('/etc/systemd/system/bootnode.service', 'x') as f:
+      f.write(bootnode_systemd_service_config)
+
+    
+    os.system("systemctl enable bootnode")
+    os.system("systemctl start bootnode")
+
+    return get_bootnode_address()
+  else:
+    print("Bootnode already prepare")
+    bootnode_status = os.popen("systemctl is-active bootnode").read()
+    print("Bootnode status: "+bootnode_status)
+
+
+def prepare_sealer(name, address, network_id, enode):
+    if not os.path.exists(working_derictory+"/sealers/"+name+"/data"):
+      print("Prepare sealer", name)
+
+      os.chdir(working_derictory)
+      os.system("mkdir sealers")
+      os.system("mkdir sealers/"+name)
+      os.system("mkdir sealers/"+name+"/data")
+      os.chdir(working_derictory+"/sealers/"+name+"/data")
+      os.system("ln -s "+working_derictory+"/keystore keystore")
+      os.chdir(working_derictory)
+
+      init_sealer_proc = subprocess.Popen([
+        working_derictory+'/bin/geth', 
+        "--datadir", 
+        working_derictory+'/sealers/'+name+'/data/',
+        "--miner.etherbase",
+        '0x'+address,
+        "--networkid",
+        str(network_id),
+        "--miner.gasprice",
+        '0',
+        "init",
+        working_derictory+'/sealers/'+name+'/genesis.json'
+      ])
+
+
+      init_sealer_proc.wait(timeout=1000)
+
+      sealers = os.listdir(working_derictory+"/sealers")
+
+      
+      httpport = 8545 + len(sealers)
+      wsport = 8445 + len(sealers)
+      port = 30303 + len(sealers)
+      authport = 8351 + len(sealers)
+      config = sealer_systemd_service_config.replace("<sealername>",name).replace("<address>",address).replace("<network_id>",str(network_id)).replace("<enode>",enode).replace("<wsport>",str(wsport)).replace("<httpport>",str(httpport)).replace("<port>",str(port)).replace("<authport>", str(authport))
+
+      
+      with open('/etc/systemd/system/sealer-'+name+'.service', 'x') as f:
+        f.write(config)
+
+      os.system("systemctl enable sealer-"+name)
+      os.system("systemctl start sealer-"+name)      
+      
+
+    else:
+      print("Sealer "+name+ " already prepare")
+
+
+def get_status_sealers():
+  sealers = os.listdir(working_derictory+"/sealers")
+  
+  if len(sealers) == 0:
+    print("Sealers not found")
+    return True
+  
+  print("\n")
+  
+  for x in sealers:
+    status = os.popen("systemctl is-active sealer-"+x).read().replace("\n","")
+    pending_transaction = geth_exec(x, "txpool.status.pending").replace("\n","")
+    queued_transaction = geth_exec(x, "txpool.status.queued").replace("\n","")
+    signers = json.loads(geth_exec(x,"clique.getSigners()"))
+
+    coinbase = geth_exec(x,"eth.coinbase").replace("\n","")
+    block_number = geth_exec(x,"eth.blockNumber").replace("\n","")
+    balance = geth_exec(x,'web3.fromWei(eth.getBalance(eth.coinbase),"ether")').replace("\n","")
+    
+    print("###############")
+    print("#### Sealer "+x+" - "+status+" ")
+    print("#### Pending transactions: "+str(pending_transaction))
+    print("#### Queued transactions: "+str(queued_transaction))
+    print("#### Working from: "+str(coinbase)+"")
+    print("#### Block number: "+str(block_number)+"")
+    print("#### Balance: "+str(balance)+"")
+
+    print("#### Signers: "+str(len(signers))+" ###")
+
+    for signer in signers:
+      print(">>>>> "+signer)
+    
+    print("###############")
+    print("\n")
+  
+  return True
+  
+
+def dialog_actions_with_sealers():
+  sealers = os.listdir(working_derictory+"/sealers")
+  
+  if len(sealers) == 0:
+    print("Sealers not found")
+    return True
+  
+  print("\n")
+  print("Select sealer:")
+  i = 1
+  for x in sealers:
+    print(str(i)+") "+x)
+    i += 1
+
+  ans = int(input("Please enter: "))-1
+
+  if sealers[ans]:
+    print("  1) Propose signer")
+    print("  2) Send ETH")
+    print("  3) Get balance")
+    print("  4) Back")
+    
+    chose = int(input("Please enter: "))
+
+    match (chose):
+      case (1):
+        address = str(input("Address for propose: "))
+        
+        print(geth_exec(sealers[ans], 'clique.propose("'+address+'",true)'))
+
+        get_status_sealers()
+
+      case (2):
+        address = str(input("Address: "))
+        amount = str(input("Amount: "))
+        call = 'eth.sendTransaction({from: eth.coinbase, to: "'+address+'", value: web3.toWei('+amount+', "ether")})'
+        
+        transaction = geth_exec(sealers[ans], call).replace("\n","")
+
+        print("Transaction: ",transaction)
+        
+      case (3):
+        address = str(input("Address: "))
+        balance = geth_exec(sealers[ans], 'web3.fromWei(eth.getBalance("'+address+'"),"ether")').replace("\n","")
+        print("Balance:", balance)
+      case (4):
+        dialog_actions_with_sealers() 
+
+      case (_):
+        dialog_actions_with_sealers() 
+    # end match
+    
+  else:
+    print("Please select correct sealer")
+    dialog_actions_with_sealers()
+
+
+def geth_exec(sealer, execute):
+  return os.popen(working_derictory+"/bin/geth --exec '"+execute+"' attach "+working_derictory+"/sealers/"+sealer+"/geth.ipc").read()  
+
+
+def diff_array(li1, li2):
+    li_dif = [i for i in li1 + li2 if i not in li1 or i not in li2]
+    return li_dif
+
+
+
+def create_account():
+  os.chdir(working_derictory)
+  
+  if not os.path.exists(working_derictory+"/keystore"):
+    os.system("mkdir keystore")
+
+  keys_before = os.listdir(working_derictory+"/keystore")
+  os.system(working_derictory+"/bin/clef newaccount --keystore "+working_derictory+"/keystore")
+  keys = os.listdir(working_derictory+"/keystore")
+  key_file = diff_array(keys_before,keys)
+  key_data = read_json(working_derictory+"/keystore/"+key_file[0])
+  address = key_data['address']
+
+  print("Created new account with address: 0x"+address)
+  return address
+
+
+def read_json(filename):
+  f = open(filename)
+  data = json.load(f)
+  f.close()
+  return data
+
+
+def create_genesis(chain_id,address, name):
+  print("Create genesis for",chain_id)
+
+  genesis = {
+    "config": {
+      "chainId": chain_id,
+      "homesteadBlock": 0,
+      "eip150Block": 0,
+      "eip155Block": 0,
+      "eip158Block": 0,
+      "byzantiumBlock": 0,
+      "constantinopleBlock": 0,
+      "petersburgBlock": 0,
+      "istanbulBlock": 0,
+      "berlinBlock": 0,
+      "clique": {
+        "period": 0,
+        "epoch": 30000
+      }
+    },
+    "nonce": "0x0",
+    "timestamp": "0x5cfbfcab",
+    "extraData": "0x0000000000000000000000000000000000000000000000000000000000000000"+address+"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "gasLimit": "0x59a5380",
+    "difficulty": "0x1",
+    "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "coinbase": "0x0000000000000000000000000000000000000000",
+    "number": "0x0",
+    "gasUsed": "0x0",
+    "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "alloc":{}
+  }
+
+  genesis['alloc'][address] = {
+    "balance": "0x33b2e3c9fd0803ce8000000"
+  }
+  
+  f = open(working_derictory+"/sealers/"+name+"/genesis.json", "w")
+  f.write(json.dumps(genesis,indent=2))
+  f.close()
+
+
+def get_bootnode_address():
+  return os.popen(working_derictory+"/bin/bootnode -nodekey "+working_derictory+"/bootnode/boot.key -writeaddress").read().replace("\n","")+"@localhost:30301"
+
+
+
+def dialog():
+  print("\n\n")
+
+  if not os.path.exists(working_derictory+"/bin"):
+    print("Geth and tools not installed! Do you want to do this? Write Y")
+
+    ans = input("Please enter: ")
+
+    if ans == "Y":
+      download_binares()
+      
+
+  else:
+    show_info()
+    print("Select what you want:")
+    print("   1 - Create new POA network")
+    print("   2 - Connect to POA network")
+    print("   3 - Delete specific node")
+    print("   4 - Show status of sealers")
+    print("   5 - Actions with sealers")
+    print("   6 - Exit")
+
+    try:
+      # end try
+      ans = int(input("Please enter: "))
+
+
+      match (ans):
+        case (1):
+          dialog_create_new_network()
+        case (2):
+          dialog_connect_to_existed_network()
+        case (3):
+          dialog_delete()
+        case (4):
+          get_status_sealers()
+          
+        case (5):
+          dialog_actions_with_sealers()      
+        case (6):
+          sys.exit() 
+          
+        case (_):
+          dialog()
+      
+      dialog()
+    except Exception as e:
+      dialog()
+
+
+
+def show_info():
+    version_geth = os.popen(working_derictory+"/bin/geth --version").read()
+    print("Installed", version_geth)
+
+    if os.path.exists(working_derictory+"/bootnode"):
+      bootnode_status = os.popen("systemctl is-active bootnode").read()
+      print("Bootnode status: "+bootnode_status+"address:",get_bootnode_address())      
+      
+
+def dialog_create_new_network():
+  prepare_bootnode()
+
+  if not os.path.exists(working_derictory+"/sealers"):
+    os.system("mkdir "+working_derictory+"/sealers")
+
+
+
+  sealer_name = str(input("Write sealer name: "))
+  network_id = int(input("Write network id: "))
+  enode = get_bootnode_address()
+  address = dialog_keys()
+
+  if not os.path.exists(working_derictory+"/sealers/"+sealer_name):
+    os.system("mkdir "+working_derictory+"/sealers/"+sealer_name)
+
+  if len(str(address)) < 10:
+    print("Failed to select address")
+    return False
+
+  create_genesis(network_id, address,sealer_name)
+  prepare_sealer(sealer_name,address, network_id, enode)
+
+
+def dialog_connect_to_existed_network():
+  if not os.path.exists(working_derictory+"/sealers"):
+    os.system("mkdir "+working_derictory+"/sealers")
+
+  sealer_name = str(input("Write sealer name: "))
+  genesis_path = str(input("Write full path to genesis file: "))
+  enode = str(input("Write address to bootnode enode://"))
+
+  if not os.path.isfile(genesis_path):
+    print("Genesis file not exist")
+    return False
+
+  genesis = read_json(genesis_path)
+
+  network_id = genesis['config']['chainId']
+
+  address = dialog_keys()
+
+  if not os.path.exists(working_derictory+"/sealers/"+sealer_name):
+    os.system("mkdir "+working_derictory+"/sealers/"+sealer_name)
+
+  f = open(working_derictory+"/sealers/"+sealer_name+"/genesis.json", "w")
+  f.write(json.dumps(genesis,indent=2))
+  f.close()
+
+
+  if len(str(address)) < 10:
+    print("Failed to select address")
+    return False
+
+  prepare_sealer(sealer_name,address, network_id, enode)
+
+
+def dialog_delete():
+  sealers = os.listdir(working_derictory+"/sealers")
+  
+  if len(sealers) == 0:
+    print("Nothing for delete")
+    return True
+
+  print("Please select node for delete")
+
+  i = 1
+  for x in sealers:
+    print(str(i)+") "+x+" node")
+    i += 1
+  
+  node = input("Enter node number: ")
+  sealername = sealers[int(node)-1]
+
+  os.system("systemctl stop sealer-"+sealername)
+  os.system("systemctl disable sealer-"+sealername)   
+
+  os.system("rm /etc/systemd/system/sealer-"+sealername+".service")
+
+  result = os.system("rm -rf "+working_derictory+"/sealers/"+sealername)
+
+
+  if result == 0:
+    print("Delete node", sealername, "success")
+    return True
+  else:
+    print("Delete node", sealername, "failed")
+    return False
+  
+
+def dialog_keys():
+
+  if not os.path.exists(working_derictory+"/keystore"):
+    os.system("mkdir "+working_derictory+"/keystore")
+
+  if not os.path.exists(working_derictory+"/passwords"):
+    os.system("mkdir "+working_derictory+"/passwords")
+
+  keys = os.listdir(working_derictory+"/keystore")
+
+  
+  print("Chose existing key or create new one:")
+
+
+  i = 1
+  if len(keys):
+    for x in keys:
+      key = read_json(working_derictory+"/keystore/"+x)
+      print(str(i)+") "+key['address'])
+      i += 1
+
+  print(str(i)+") Create new account")
+
+  ans = input("Please enter: ")
+
+  if int(ans) == i:
+    address = create_account()
+    password = input("Write password for key again: ")
+      
+    f = open(working_derictory+"/passwords/"+address+".pass", "w")
+    f.write(password)
+    f.close()
+
+    return address
+  else:
+    return read_json(working_derictory+"/keystore/"+keys[int(ans)-1])['address']
+
+    
+dialog()
