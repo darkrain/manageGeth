@@ -6,6 +6,7 @@ import requests
 import json
 import subprocess
 import sys
+import time
 
 
 version_geth = "geth-alltools-linux-amd64-1.13.1-3f40e65c"
@@ -261,6 +262,8 @@ def read_json(filename):
 def create_genesis(chain_id,address, name):
   print("Create genesis for",chain_id)
 
+  
+
   genesis = {
     "config": {
       "chainId": chain_id,
@@ -279,7 +282,7 @@ def create_genesis(chain_id,address, name):
       }
     },
     "nonce": "0x0",
-    "timestamp": "0x5cfbfcab",
+    "timestamp": hex(int(time.time())),
     "extraData": "0x0000000000000000000000000000000000000000000000000000000000000000"+address+"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
     "gasLimit": "0x59a5380",
     "difficulty": "0x1",
