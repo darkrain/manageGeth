@@ -19,7 +19,8 @@ What it can do:
     Pending transactions: 0 
     Transactions in queue: 0 
     Working with: "0x730074d5e8352dfe0d8847a7d25797dde1293ca2" 
-    Block number: 476 Balance: 999987837.11510033744184 
+    Block number: 476 
+    Balance: 999987837
     Signers: 5 
     0x1f86a66305168d6282573549358f163350f5693f 
     0x730074d5e8352dfe0d8847a7d25797dde1293ca2 
