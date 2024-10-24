@@ -188,7 +188,9 @@ def dialog_actions_with_sealers():
     print("  1) Propose signer")
     print("  2) Send ETH")
     print("  3) Get balance")
-    print("  4) Back")
+    print("  4) Connect to IPC")
+    print("  5) Back")
+
     
     chose = int(input("Please enter: "))
 
@@ -213,7 +215,11 @@ def dialog_actions_with_sealers():
         address = str(input("Address: "))
         balance = geth_exec(sealers[ans], 'web3.fromWei(eth.getBalance("'+address+'"),"ether")').replace("\n","")
         print("Balance:", balance)
+
       case (4):
+        geth_run_ipc(sealers[ans])
+
+      case (5):
         dialog_actions_with_sealers() 
 
       case (_):
@@ -227,6 +233,9 @@ def dialog_actions_with_sealers():
 
 def geth_exec(sealer, execute):
   return os.popen(working_derictory+"/bin/geth --exec '"+execute+"' attach "+working_derictory+"/sealers/"+sealer+"/geth.ipc").read()  
+
+def geth_run_ipc(sealer):
+  return subprocess.run([working_derictory+"/bin/geth","attach", working_derictory+"/sealers/"+sealer+"/geth.ipc"])  
 
 
 def diff_array(li1, li2):
